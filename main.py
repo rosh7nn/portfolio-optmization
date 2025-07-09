@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from arch import arch_model
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
 from statsmodels.tsa.arima.model import ARIMA
 import xgboost as xgb
 from scipy.optimize import minimize
@@ -15,8 +18,89 @@ import warnings
 from typing import Dict, Tuple, List
 warnings.filterwarnings('ignore')
 
+# Plotting Configuration
+def setup_plot_style():
+    """Configure consistent plotting style for all visualizations"""
+    sns.set_context('notebook')
+    sns.set_style('whitegrid')
+    plt.rcParams.update({
+        'figure.figsize': (14, 7),
+        'axes.labelsize': 12,
+        'axes.titlesize': 14,
+        'legend.fontsize': 10,
+        'grid.alpha': 0.3,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight'
+    })
+
+# Initialize plot style
+setup_plot_style()
+
+# Data Saving Utilities
+def ensure_data_dir():
+    """Ensure data directory exists"""
+    os.makedirs('data', exist_ok=True)
+    os.makedirs('plots', exist_ok=True)
+
+def save_dataframe(df: pd.DataFrame, filename: str, index: bool = True):
+    """
+    Unified function to save DataFrames to CSV with consistent settings.
+    
+    Args:
+        df: DataFrame to save
+        filename: Full path to save the file
+        index: Whether to save the index
+    """
+    ensure_data_dir()
+    df.to_csv(filename, index=index)
+    print(f"✓ Saved: {filename}")
+
+def plot_equity_and_drawdown(results: dict, title: str, filename: str):
+    """
+    Create and save equity curve and drawdown plots.
+    
+    Args:
+        results: Dictionary containing backtest results
+        title: Plot title
+        filename: Base filename (without extension) for saving plots
+    """
+    # Ensure plots directory exists
+    os.makedirs('plots', exist_ok=True)
+    
+    # Plot equity curve
+    plt.figure()
+    plt.plot(results['portfolio_value'], label='Portfolio', linewidth=2)
+    plt.title(f'{title} - Equity Curve')
+    plt.xlabel('Date')
+    plt.ylabel('Portfolio Value')
+    plt.grid(True)
+    plt.legend()
+    
+    equity_path = f'plots/{filename}_equity.png'
+    plt.savefig(equity_path)
+    plt.close()
+    print(f"✓ Saved equity curve to {equity_path}")
+
+    # Plot drawdown if daily returns are available
+    if 'daily_returns' in results and results['daily_returns'] is not None:
+        cum_returns = (1 + results['daily_returns']).cumprod()
+        drawdown = (cum_returns / cum_returns.cummax() - 1) * 100
+        
+        plt.figure(figsize=(14, 4))
+        plt.fill_between(drawdown.index, drawdown, 0, color='red', alpha=0.3)
+        plt.plot(drawdown, color='darkred', linewidth=1)
+        plt.title(f'{title} - Drawdown')
+        plt.xlabel('Date')
+        plt.ylabel('Drawdown (%)')
+        plt.grid(True)
+        
+        drawdown_path = f'plots/{filename}_drawdown.png'
+        plt.savefig(drawdown_path)
+        plt.close()
+        print(f"✓ Saved drawdown plot to {drawdown_path}")
+
 # Configuration
-START_DATE = '2023-01-01'  # Start date for backtest
+START_DATE = '2022-01-01'  # Start date for backtest
 END_DATE = '2025-07-01'    # End date for backtest
 ESTIMATION_WINDOW = 252  # 12 months of trading days
 REBALANCE_FREQ = 'M'     # Monthly rebalancing
@@ -407,11 +491,20 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
         'portfolio_value': pd.Series(1.0, index=log_returns.index),
         'daily_returns': pd.Series(0.0, index=log_returns.index),
         'turnover': pd.Series(0.0, index=log_returns.index),
-        'weights': pd.DataFrame(0.0, index=log_returns.index, columns=log_returns.columns)
+        'weights': pd.DataFrame(0.0, index=log_returns.index, columns=log_returns.columns),
+        'mn75': pd.Series(0.0, index=log_returns.index, dtype=float),  # Track MN75% over time
+        'mn90': pd.Series(0.0, index=log_returns.index, dtype=float)   # Track MN90% over time
     }
     
     # Initialize portfolio weights (equal weight)
-    current_weights = pd.Series(1.0/len(log_returns.columns), index=log_returns.columns)
+    current_weights = pd.Series(0.0, index=log_returns.columns)
+    current_weights[:] = 1.0 / len(log_returns.columns)  # Equal weight initialization
+    
+    # Debug: Print initial weights
+    print("\nInitial portfolio weights:")
+    print(f"Sum: {current_weights.sum():.6f}")
+    print(f"Min: {current_weights.min():.6f}, Max: {current_weights.max():.6f}")
+    print(f"Number of assets: {len(current_weights)}")
     
     # Main backtest loop
     for i, date in enumerate(log_returns.index[ESTIMATION_WINDOW:], start=ESTIMATION_WINDOW):
@@ -451,20 +544,41 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
             cum_weights = np.cumsum(sorted_weights)
             n_75 = np.argmax(cum_weights >= 0.75) + 1
             n_90 = np.argmax(cum_weights >= 0.90) + 1
+            results['mn75'].loc[date] = n_75
+            results['mn90'].loc[date] = n_90
             print(f"  MN75%: {n_75}, MN90%: {n_90}")
             
-            # Update weights
-            current_weights = new_weights
+            # Update weights - ensure they sum to 1 and handle any numerical precision issues
+            new_weights = new_weights / new_weights.sum()  # Renormalize to ensure sum=1
+            print(f"\nNew weights assigned - Sum: {new_weights.sum():.6f}, "
+                  f"Min: {new_weights.min():.6f}, Max: {new_weights.max():.6f}")
+            print(f"Number of assets with weight > 0: {(new_weights > 1e-6).sum()}")
+            
+            # Store weights in results before updating current_weights
+            results['weights'].loc[date, :] = new_weights
+            
+            # Update current weights for next period
+            current_weights = new_weights.copy()
         
-        # Store current weights
-        results['weights'].iloc[i] = current_weights
+        # Store current weights - ensure proper alignment with columns
+        results['weights'].loc[date, :] = current_weights
         
-        # Calculate daily return
-        daily_return = (current_weights * np.exp(log_returns.iloc[i])).sum() - 1
-        results['daily_returns'].iloc[i] = daily_return
+        # Calculate daily return using simple returns (not log returns)
+        # Convert log returns to simple returns: r = exp(log_return) - 1
+        simple_returns = np.exp(log_returns.loc[date]) - 1
+        daily_return = (current_weights * simple_returns).sum()
+        results['daily_returns'].loc[date] = daily_return
         
-        # Update portfolio value
-        results['portfolio_value'].iloc[i] = results['portfolio_value'].iloc[i-1] * (1 + daily_return)
+        # Update portfolio value using simple returns
+        if i > ESTIMATION_WINDOW:  # First day after estimation window
+            results['portfolio_value'].loc[date] = results['portfolio_value'].iloc[i-1] * (1 + daily_return)
+        else:
+            results['portfolio_value'].loc[date] = 1.0 * (1 + daily_return)
+        
+        # Debug output for the first few days and rebalance days
+        if i < ESTIMATION_WINDOW + 5 or date in rebalance_dates:  # First 5 days + rebalance days
+            print(f"Day {i}: Portfolio Value = {results['portfolio_value'].iloc[i]:.6f}, "
+                  f"Daily Return = {daily_return:.6f}")
     
     return results
 
@@ -472,6 +586,7 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
 def calculate_performance_metrics(portfolio_values: pd.Series, 
                                daily_returns: pd.Series, 
                                weights_history: pd.DataFrame = None,
+                               benchmark_returns: pd.Series = None,
                                freq: int = 252) -> Dict[str, float]:
     """
     Calculate performance metrics for the backtested portfolio.
@@ -480,6 +595,7 @@ def calculate_performance_metrics(portfolio_values: pd.Series,
         portfolio_values: Series of portfolio values over time
         daily_returns: Series of daily returns
         weights_history: DataFrame containing portfolio weights over time (for MN75% and MN90%)
+        benchmark_returns: Series of benchmark returns (e.g., equal-weighted portfolio)
         freq: Number of trading days in a year
         
     Returns:
@@ -505,16 +621,44 @@ def calculate_performance_metrics(portfolio_values: pd.Series,
     drawdowns = (cum_returns / peak - 1) * 100
     max_drawdown = drawdowns.min()
     
-    # Calculate risk-adjusted returns
-    excess_returns = daily_returns - RISK_FREE_RATE / freq
-    sharpe_ratio = np.sqrt(freq) * excess_returns.mean() / daily_returns.std()
-    sortino_ratio = np.sqrt(freq) * excess_returns.mean() / daily_returns[daily_returns < 0].std()
+    # Calculate risk-adjusted returns - only keep Sharpe Ratio
+    # Calculate excess returns over risk-free rate (annualized)
+    excess_returns = daily_returns - (RISK_FREE_RATE / freq)
     
-    # Calculate information ratio (vs. equal-weighted portfolio)
-    if isinstance(daily_returns, pd.DataFrame):
-        equal_weight_returns = daily_returns.mean(axis=1)
-        tracking_error = (daily_returns.sub(equal_weight_returns, axis=0)).std().mean() * np.sqrt(freq)
-        information_ratio = (annualized_return - equal_weight_returns.mean() * freq) / tracking_error if tracking_error != 0 else float('nan')
+    # Calculate annualized excess return and volatility
+    annualized_excess_return = (1 + excess_returns).prod() ** (freq/len(daily_returns)) - 1
+    annualized_vol = daily_returns.std() * np.sqrt(freq)
+    
+    # Sharpe Ratio = (Annualized Excess Return) / Annualized Volatility
+    sharpe_ratio = (annualized_excess_return / annualized_vol) if annualized_vol > 0 else 0
+    
+    # Calculate information ratio (vs. benchmark returns if provided, otherwise vs. equal-weighted portfolio)
+    if benchmark_returns is not None and len(benchmark_returns) == len(daily_returns):
+        # Ensure benchmark returns are aligned with portfolio returns
+        benchmark_returns = benchmark_returns.reindex(daily_returns.index).fillna(0)
+        
+        # Calculate active returns (portfolio return - benchmark return)
+        active_returns = daily_returns - benchmark_returns
+        
+        # Calculate tracking error (annualized standard deviation of active returns)
+        tracking_error = active_returns.std() * np.sqrt(freq)
+        
+        # Calculate annualized returns for both portfolio and benchmark
+        portfolio_ann_return = (1 + daily_returns).prod() ** (freq/len(daily_returns)) - 1
+        benchmark_ann_return = (1 + benchmark_returns).prod() ** (freq/len(benchmark_returns)) - 1
+        
+        # Information Ratio = (Portfolio Ann. Return - Benchmark Ann. Return) / Tracking Error
+        if tracking_error > 1e-10:  # Avoid division by near-zero
+            information_ratio = (portfolio_ann_return - benchmark_ann_return) / tracking_error
+        else:
+            information_ratio = float('nan')
+            
+        # Debug output
+        print(f"\nInformation Ratio Calculation:")
+        print(f"- Portfolio Ann. Return: {portfolio_ann_return:.4f}")
+        print(f"- Benchmark Ann. Return: {benchmark_ann_return:.4f}")
+        print(f"- Tracking Error: {tracking_error:.6f}")
+        print(f"- Information Ratio: {information_ratio:.4f}")
     else:
         information_ratio = float('nan')
     
@@ -540,12 +684,11 @@ def calculate_performance_metrics(portfolio_values: pd.Series,
         mn90 = weights_history.apply(lambda x: get_min_stocks(x, 0.90), axis=1).mean()
     
     metrics = {
-        'Absolute Return (%)': total_return * 100,
-        'Annualized Return (%)': annualized_return * 100,
-        'Annualized Volatility (%)': annualized_vol * 100,
-        'Max Drawdown (%)': max_drawdown,
+        'Total Return': total_return * 100,
+        'Annualized Return': annualized_return * 100,
+        'Annualized Volatility': annualized_vol * 100,
+        'Max Drawdown': max_drawdown,
         'Sharpe Ratio': sharpe_ratio,
-        'Sortino Ratio': sortino_ratio,
         'Information Ratio': information_ratio,
         'Modified IR': mir,
         'Mean Stocks (75% coverage)': mn75,
@@ -640,9 +783,7 @@ def plot_backtest_results(results: Dict[str, pd.Series], title: str = 'Portfolio
         save_strategy_returns(results, strategy_name)
 
 
-def ensure_data_dir():
-    """Ensure data directory exists"""
-    os.makedirs('data', exist_ok=True)
+# This function is now defined in the utilities section above
 
 def apply_transaction_costs(portfolio_values: pd.Series, turnover_series: pd.Series, 
                           rebalance_dates: pd.DatetimeIndex, tc_rate: float) -> pd.Series:
@@ -667,57 +808,53 @@ def apply_transaction_costs(portfolio_values: pd.Series, turnover_series: pd.Ser
 
 
 def save_backtest_results(results: dict, strategy_name: str):
-    """Save backtest results to CSV files"""
-    ensure_data_dir()
+    """
+    Save comprehensive backtest results to CSV files for later analysis and plotting.
+    Follows the paper's approach of saving all necessary data for reporting.
+    """
+    # Create safe filename prefix
+    safe_name = strategy_name.lower().replace(' ', '_')
     
     # Save portfolio values
-    portfolio_values = pd.DataFrame({
+    portfolio_data = pd.DataFrame({
+        'date': results['portfolio_value'].index,
         'portfolio_value': results['portfolio_value'],
-        'daily_returns': results['daily_returns']
+        'daily_return': results['daily_returns']
     })
-    
-    # Add transaction cost variants
-    for tc in TRANSACTION_COSTS:
-        tc_portfolio = apply_transaction_costs(
-            results['portfolio_value'],
-            results['turnover'],
-            results['turnover'][results['turnover'] > 0].index,  # Only rebalance dates
-            tc
-        )
-        portfolio_values[f'portfolio_value_after_tc_{int(tc*10000)}bps'] = tc_portfolio
-    
-    portfolio_values.to_csv(f'data/{strategy_name}_values.csv')
+    save_dataframe(portfolio_data, f'data/portfolio_{safe_name}.csv', index=False)
     
     # Save weights if available
-    if 'weights' in results and not results['weights'].empty:
-        results['weights'].to_csv(f'data/{strategy_name}_weights.csv')
+    if 'weights' in results and results['weights'] is not None:
+        weights_df = results['weights']
+        save_dataframe(weights_df, f'data/weights_{safe_name}.csv')
     
-    # Save turnover if available
-    if 'turnover' in results and not results['turnover'].empty:
-        results['turnover'].to_csv(f'data/{strategy_name}_turnover.csv')
+    # Save metrics if available
+    if 'metrics' in results and results['metrics'] is not None:
+        metrics_df = pd.DataFrame([results['metrics']])
+        save_dataframe(metrics_df, f'data/metrics_{safe_name}.csv', index=False)
     
-    # Save weights if available
-    if 'weights_history' in results and results['weights_history'] is not None:
-        results['weights_history'].to_csv(f'data/{strategy_name}_weights.csv')
+    # Generate and save plots
+    plot_equity_and_drawdown(results, strategy_name, safe_name)
+    
+    print(f"✓ Saved complete backtest results for {strategy_name} to data/ directory")
 
 
 def main(use_cached_data: bool = True):
-    # Ensure data directory exists
-    ensure_data_dir()
+    """Main function to run the backtest"""
+    # Initialize dictionaries to store results and metrics for all strategies
+    all_results = {}
+    all_metrics_list = []
     
     print("Preparing data...")
-    prices, log_returns, rebalance_dates = prepare_data(use_cached=use_cached_data)
+    _, log_returns, rebalance_dates = prepare_data(use_cached=use_cached_data)
     
-    # Define strategies to test
+    # Define strategy configurations
     strategies = [
         ('arima_garch', 'gmir', 'ARIMA-GARCH GMIR'),
         ('arima_garch', 'gmv', 'ARIMA-GARCH GMV'),
         ('xgboost', 'gmir', 'XGBoost GMIR'),
         ('xgboost', 'gmv', 'XGBoost GMV'),
     ]
-    
-    all_metrics = {}
-    all_results = {}
     
     for model_type, objective, strategy_name in strategies:
         print(f"\nRunning {strategy_name} strategy...")
@@ -728,50 +865,76 @@ def main(use_cached_data: bool = True):
             objective=objective
         )
         
-        # Save results for final comparison plot
-        all_results[strategy_name] = results
+        # Calculate equal-weighted benchmark returns (if this is the first strategy)
+        benchmark_returns = None
+        if strategy_name == strategies[0][2]:  # Only calculate once
+            # Calculate equal-weighted portfolio returns
+            benchmark_returns = log_returns.mean(axis=1)
+            benchmark_returns = benchmark_returns[rebalance_dates[0]:]  # Align with backtest period
         
-        # Save detailed results to CSV
-        save_backtest_results(results, strategy_name)
-        
-        # Calculate performance metrics
+        # Calculate performance metrics with benchmark returns
         metrics = calculate_performance_metrics(
             portfolio_values=results['portfolio_value'],
             daily_returns=results['daily_returns'],
-            weights_history=results['weights']
+            benchmark_returns=benchmark_returns,
+            weights_history=results.get('weights')
         )
-        all_metrics[strategy_name] = metrics
+        
+        # Add strategy name to metrics
+        metrics['strategy'] = strategy_name
+        metrics['model'] = model_type
+        metrics['objective'] = objective
+        
+        # Store results and metrics
+        all_results[strategy_name] = results
+        all_metrics_list.append(metrics)
+        
+        # Add metrics to results for saving
+        results['metrics'] = metrics
+        
+        # Save detailed results
+        save_backtest_results(results, strategy_name)
         
         # Print metrics
         print(f"\n{strategy_name} Performance:")
         print("-" * 50)
         for metric, value in metrics.items():
-            if isinstance(value, float):
-                print(f"{metric}: {value:.4f}")
-            else:
-                print(f"{metric}: {value}")
-            
-        # Plot and save results
-        plot_backtest_results(
-            results, 
-            title=f'{strategy_name} Performance',
-            strategy_name=strategy_name
-        )
+            if metric not in ['strategy', 'model', 'objective']:  # Skip metadata in printout
+                if isinstance(value, float):
+                    print(f"{metric}: {value:.4f}")
+                else:
+                    print(f"{metric}: {value}")
+    
+    # After all strategies have run, generate comparison plots and summary
+    if all_metrics_list:
+        # Convert metrics to DataFrame for easier manipulation
+        metrics_df = pd.DataFrame(all_metrics_list)
         
-        # Save metrics to master CSV after each strategy
-        metrics_df = pd.DataFrame.from_dict(all_metrics, orient='index')
-        metrics_df.to_csv('data/strategy_metrics_summary.csv')
-        print(f"\nSaved detailed results for {strategy_name} to data/ directory")
-    
-    # Save all metrics to CSV
-    metrics_df = pd.DataFrame.from_dict(all_metrics, orient='index')
-    metrics_df.to_csv('data/strategy_metrics_summary.csv')
-    print("\nSaved strategy metrics to data/strategy_metrics_summary.csv")
-    
-    # Print metrics summary
-    print("\nStrategy Comparison:")
-    print("-" * 50)
-    print(metrics_df.round(4))
+        # Save combined metrics
+        metrics_df.to_csv('data/all_metrics.csv', index=False)
+        print("\n✓ Saved combined metrics to data/all_metrics.csv")
+        
+        # Generate and save comparison plot
+        plt.figure(figsize=(14, 10))
+        metrics_to_plot = ['Total Return', 'Annualized Return', 'Sharpe Ratio', 'Max Drawdown']
+        
+        for i, metric in enumerate(metrics_to_plot, 1):
+            plt.subplot(2, 2, i)
+            sns.barplot(x='strategy', y=metric, data=metrics_df, hue='objective')
+            plt.title(metric)
+            plt.xticks(rotation=45, ha='right')
+            plt.tight_layout()
+        
+        comparison_path = 'plots/strategy_comparison.png'
+        plt.savefig(comparison_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"✓ Saved strategy comparison plot to {comparison_path}")
+        
+        # Print summary table
+        print("\nStrategy Comparison:")
+        print("-" * 50)
+        print(metrics_df[['strategy', 'objective', 'Total Return', 'Annualized Return', 
+                         'Sharpe Ratio', 'Max Drawdown']].to_string(index=False))
     
     # Plot strategy comparison
     plt.figure(figsize=(14, 8))
@@ -786,13 +949,12 @@ def main(use_cached_data: bool = True):
     plt.tight_layout()
     
     # Save comparison plot
-    comparison_plot_path = 'data/strategy_comparison.png'
+    comparison_plot_path = 'plots/strategy_comparison_equity.png'
     plt.savefig(comparison_plot_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"\nSaved strategy comparison plot to {comparison_plot_path}")
+    print(f"\n✓ Saved strategy comparison plot to {comparison_plot_path}")
     
-    # Show all plots at the end
-    plt.show()
+    return all_results
 
 if __name__ == "__main__":
     import argparse

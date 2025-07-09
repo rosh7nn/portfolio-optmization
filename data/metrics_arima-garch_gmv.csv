@@ -1,0 +1,2 @@
+Total Return,Annualized Return,Annualized Volatility,Max Drawdown,Sharpe Ratio,Information Ratio,Modified IR,Mean Stocks (75% coverage),Mean Stocks (90% coverage),strategy,model,objective
+22.71826632816265,8.780225077333824,10.809246074511709,-16.717576947125412,0.3215807362043202,,0.4266213281612986,35.69004893964111,41.83034257748776,ARIMA-GARCH GMV,arima_garch,gmv
