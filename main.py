@@ -100,7 +100,7 @@ def plot_equity_and_drawdown(results: dict, title: str, filename: str):
         print(f"✓ Saved drawdown plot to {drawdown_path}")
 
 # Configuration
-START_DATE = '2022-01-01'  # Start date for backtest
+START_DATE = '2023-01-01'  # Start date for backtest
 END_DATE = '2025-07-01'    # End date for backtest
 ESTIMATION_WINDOW = 252  # 12 months of trading days
 REBALANCE_FREQ = 'M'     # Monthly rebalancing
@@ -633,34 +633,38 @@ def calculate_performance_metrics(portfolio_values: pd.Series,
     sharpe_ratio = (annualized_excess_return / annualized_vol) if annualized_vol > 0 else 0
     
     # Calculate information ratio (vs. benchmark returns if provided, otherwise vs. equal-weighted portfolio)
-    if benchmark_returns is not None and len(benchmark_returns) == len(daily_returns):
-        # Ensure benchmark returns are aligned with portfolio returns
-        benchmark_returns = benchmark_returns.reindex(daily_returns.index).fillna(0)
-        
-        # Calculate active returns (portfolio return - benchmark return)
-        active_returns = daily_returns - benchmark_returns
-        
-        # Calculate tracking error (annualized standard deviation of active returns)
-        tracking_error = active_returns.std() * np.sqrt(freq)
-        
-        # Calculate annualized returns for both portfolio and benchmark
-        portfolio_ann_return = (1 + daily_returns).prod() ** (freq/len(daily_returns)) - 1
-        benchmark_ann_return = (1 + benchmark_returns).prod() ** (freq/len(benchmark_returns)) - 1
-        
-        # Information Ratio = (Portfolio Ann. Return - Benchmark Ann. Return) / Tracking Error
-        if tracking_error > 1e-10:  # Avoid division by near-zero
-            information_ratio = (portfolio_ann_return - benchmark_ann_return) / tracking_error
-        else:
-            information_ratio = float('nan')
+    information_ratio = float('nan')
+    if benchmark_returns is not None and not benchmark_returns.empty:
+        try:
+            # Ensure benchmark returns are aligned with portfolio returns
+            aligned_benchmark = benchmark_returns.reindex(daily_returns.index, fill_value=0)
             
-        # Debug output
-        print(f"\nInformation Ratio Calculation:")
-        print(f"- Portfolio Ann. Return: {portfolio_ann_return:.4f}")
-        print(f"- Benchmark Ann. Return: {benchmark_ann_return:.4f}")
-        print(f"- Tracking Error: {tracking_error:.6f}")
-        print(f"- Information Ratio: {information_ratio:.4f}")
-    else:
-        information_ratio = float('nan')
+            # Only calculate if we have sufficient data points
+            if len(aligned_benchmark) > 10:  # Minimum 10 data points required
+                # Calculate active returns (portfolio return - benchmark return)
+                active_returns = daily_returns - aligned_benchmark
+                
+                # Calculate tracking error (annualized standard deviation of active returns)
+                tracking_error = active_returns.std() * np.sqrt(freq)
+                
+                # Calculate annualized returns for both portfolio and benchmark
+                portfolio_ann_return = (1 + daily_returns).prod() ** (freq/len(daily_returns)) - 1
+                benchmark_ann_return = (1 + aligned_benchmark).prod() ** (freq/len(aligned_benchmark)) - 1
+                
+                # Information Ratio = (Portfolio Ann. Return - Benchmark Ann. Return) / Tracking Error
+                if tracking_error > 1e-10:  # Avoid division by near-zero
+                    information_ratio = (portfolio_ann_return - benchmark_ann_return) / tracking_error
+                
+                # Debug output
+                print(f"\nInformation Ratio Calculation:")
+                print(f"- Portfolio Ann. Return: {portfolio_ann_return:.4f}")
+                print(f"- Benchmark Ann. Return: {benchmark_ann_return:.4f}")
+                print(f"- Tracking Error: {tracking_error:.6f}")
+                print(f"- Information Ratio: {information_ratio:.4f}")
+                
+        except Exception as e:
+            print(f"Error calculating Information Ratio: {str(e)}")
+            information_ratio = float('nan')
     
     # Calculate Modified Information Ratio (MIR)
     arc = annualized_return * 100  # Convert to percentage for MIR calculation
@@ -856,8 +860,20 @@ def main(use_cached_data: bool = True):
         ('xgboost', 'gmv', 'XGBoost GMV'),
     ]
     
+    # Calculate benchmark returns (equal-weighted portfolio) once for all strategies
+    benchmark_returns = log_returns.mean(axis=1)
+    benchmark_returns = benchmark_returns[rebalance_dates[0]:]  # Align with backtest period
+    print(f"\nCalculated benchmark returns from {benchmark_returns.index[0]} to {benchmark_returns.index[-1]}")
+    print(f"Benchmark mean return: {benchmark_returns.mean():.6f}, std: {benchmark_returns.std():.6f}")
+    
+    # Run backtest for each strategy
     for model_type, objective, strategy_name in strategies:
-        print(f"\nRunning {strategy_name} strategy...")
+        print(f"\n{'='*50}")
+        print(f"Running backtest for {strategy_name}...")
+        print(f"Model: {model_type}, Objective: {objective.upper()}")
+        print(f"{'='*50}")
+        
+        # Run backtest
         results = run_backtest(
             log_returns=log_returns,
             rebalance_dates=rebalance_dates,
@@ -865,22 +881,16 @@ def main(use_cached_data: bool = True):
             objective=objective
         )
         
-        # Calculate equal-weighted benchmark returns (if this is the first strategy)
-        benchmark_returns = None
-        if strategy_name == strategies[0][2]:  # Only calculate once
-            # Calculate equal-weighted portfolio returns
-            benchmark_returns = log_returns.mean(axis=1)
-            benchmark_returns = benchmark_returns[rebalance_dates[0]:]  # Align with backtest period
-        
         # Calculate performance metrics with benchmark returns
+        print(f"\nCalculating performance metrics for {strategy_name}...")
         metrics = calculate_performance_metrics(
             portfolio_values=results['portfolio_value'],
             daily_returns=results['daily_returns'],
-            benchmark_returns=benchmark_returns,
+            benchmark_returns=benchmark_returns,  # Use the pre-calculated benchmark
             weights_history=results.get('weights')
         )
         
-        # Add strategy name to metrics
+        # Add strategy metadata to metrics
         metrics['strategy'] = strategy_name
         metrics['model'] = model_type
         metrics['objective'] = objective
