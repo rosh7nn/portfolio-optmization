@@ -1,5 +1,0 @@
-Strategy,Total Return (%),Ann. Return (%),Ann. Volatility (%),Sharpe Ratio,Max Drawdown (%),Information Ratio,Modified IR,Mean Stocks (75% cov),Mean Stocks (90% cov)
-ARIMA-GARCH GMIR,19.43,7.57,11.35,0.205,-19.64,N/A,0.257,30.4,34.6
-ARIMA-GARCH GMV,22.72,8.78,10.81,0.322,-16.72,N/A,0.427,35.7,41.8
-XGBoost GMIR,16.97,6.65,11.34,0.128,-19.73,N/A,0.198,30.5,35.1
-XGBoost GMV,21.06,8.17,10.85,0.267,-16.53,N/A,0.373,35.9,42.0

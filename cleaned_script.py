@@ -88,15 +88,15 @@ def plot_equity_and_drawdown(results: dict, title: str, safe_name: str, first_re
     plt.close()
     print(f"✓ Saved drawdown plot to {drawdown_path}")
 
-START_DATE = '2023-01-01'  
-END_DATE = '2025-07-01'    
-ESTIMATION_WINDOW = 252  
-REBALANCE_FREQ = 'M'     
-FORECAST_HORIZON = 50    
-TRANSACTION_COSTS = [0.0005, 0.001, 0.002, 0.005]  
-MAX_WEIGHT = 0.1         
-BOOTSTRAP_PATHS = 1000   
-RISK_FREE_RATE = 0.05    
+START_DATE = '2023-01-01'  # Start date for backtest
+END_DATE = '2025-07-01'    # End date for backtest
+ESTIMATION_WINDOW = 252  # 12 months of trading days
+REBALANCE_FREQ = 'M'     # Monthly rebalancing
+FORECAST_HORIZON = 50    # max(21 * f, 50) where f=1 month
+TRANSACTION_COSTS = [0.0005, 0.001, 0.002, 0.005]  # 0.05%, 0.1%, 0.2%, 0.5%
+MAX_WEIGHT = 0.1         # Maximum weight per stock
+BOOTSTRAP_PATHS = 1000   # Number of bootstrap paths for simulation
+RISK_FREE_RATE = 0.05    # Annual risk-free rate
 
 XGB_PARAMS = {
     'objective': 'reg:squarederror',
@@ -257,8 +257,8 @@ def forecast_xgboost(returns: pd.Series, lags: int = 11,
             current_features[0, 0] = pred
 
         cumulative_returns = np.cumsum(forecasts)
-        mean_return = cumulative_returns[-1]  
-        volatility = np.std(forecasts) * np.sqrt(horizon)  
+        mean_return = cumulative_returns[-1]  # Total return over horizon
+        volatility = np.std(forecasts) * np.sqrt(horizon)  # Annualized volatility
         
         return mean_return, volatility
         
@@ -305,12 +305,12 @@ def optimize_portfolio(mu: np.ndarray, sigma: np.ndarray,
         def objective_function(weights):
             portfolio_return = weights.T @ mu
             portfolio_vol = np.sqrt(weights.T @ sigma @ weights)
-            return -portfolio_return / portfolio_vol  
+            return -portfolio_return / portfolio_vol  # Negative for minimization
     else:
         raise ValueError("Objective must be 'gmv' or 'gmir'")
 
     constraints = [
-        {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}  
+        {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}  # Sum to 1
     ]
 
     bounds = tuple((0, max_weight) for _ in range(n_assets))
@@ -353,12 +353,12 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
         'daily_returns': pd.Series(0.0, index=log_returns.index),
         'turnover': pd.Series(0.0, index=log_returns.index),
         'weights': pd.DataFrame(0.0, index=log_returns.index, columns=log_returns.columns),
-        'mn75': pd.Series(0.0, index=log_returns.index, dtype=float),  
-        'mn90': pd.Series(0.0, index=log_returns.index, dtype=float)   
+        'mn75': pd.Series(0.0, index=log_returns.index, dtype=float),  # Track MN75% over time
+        'mn90': pd.Series(0.0, index=log_returns.index, dtype=float)   # Track MN90% over time
     }
 
     current_weights = pd.Series(0.0, index=log_returns.columns)
-    current_weights[:] = 1.0 / len(log_returns.columns)  
+    current_weights[:] = 1.0 / len(log_returns.columns)  # Equal weight initialization
 
     print("\nInitial portfolio weights:")
     print(f"Sum: {current_weights.sum():.6f}")
@@ -399,7 +399,7 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
             results['mn90'].loc[date] = n_90
             print(f"  MN75%: {n_75}, MN90%: {n_90}")
 
-            new_weights = new_weights / new_weights.sum()  
+            new_weights = new_weights / new_weights.sum()  # Renormalize to ensure sum=1
             print(f"\nNew weights assigned - Sum: {new_weights.sum():.6f}, "
                   f"Min: {new_weights.min():.6f}, Max: {new_weights.max():.6f}")
             print(f"Number of assets with weight > 0: {(new_weights > 1e-6).sum()}")
@@ -414,12 +414,12 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
         daily_return = (current_weights * simple_returns).sum()
         results['daily_returns'].loc[date] = daily_return
 
-        if i > ESTIMATION_WINDOW:  
+        if i > ESTIMATION_WINDOW:  # First day after estimation window
             results['portfolio_value'].loc[date] = results['portfolio_value'].iloc[i-1] * (1 + daily_return)
         else:
             results['portfolio_value'].loc[date] = 1.0 * (1 + daily_return)
 
-        if i < ESTIMATION_WINDOW + 5 or date in rebalance_dates:
+        if i < ESTIMATION_WINDOW + 5 or date in rebalance_dates:  # First 5 days + rebalance days
             print(f"Day {i}: Portfolio Value = {results['portfolio_value'].iloc[i]:.6f}, "
                   f"Daily Return = {daily_return:.6f}")
     
@@ -461,7 +461,7 @@ def calculate_performance_metrics(portfolio_values: pd.Series,
 
             aligned_benchmark = benchmark_returns.reindex(daily_returns.index, fill_value=0)
 
-            if len(aligned_benchmark) > 10: 
+            if len(aligned_benchmark) > 10:  # Minimum 10 data points required
 
                 active_returns = daily_returns - aligned_benchmark
 
@@ -470,7 +470,7 @@ def calculate_performance_metrics(portfolio_values: pd.Series,
                 portfolio_ann_return = (1 + daily_returns).prod() ** (freq/len(daily_returns)) - 1
                 benchmark_ann_return = (1 + aligned_benchmark).prod() ** (freq/len(aligned_benchmark)) - 1
 
-                if tracking_error > 1e-10:  
+                if tracking_error > 1e-10:  # Avoid division by near-zero
                     information_ratio = (portfolio_ann_return - benchmark_ann_return) / tracking_error
 
                 print(f"\nInformation Ratio Calculation:")
@@ -483,9 +483,9 @@ def calculate_performance_metrics(portfolio_values: pd.Series,
             print(f"Error calculating Information Ratio: {str(e)}")
             information_ratio = float('nan')
 
-    arc = annualized_return * 100  
+    arc = annualized_return * 100  # Convert to percentage for MIR calculation
     mdd = max_drawdown
-    asd = annualized_vol * 100  
+    asd = annualized_vol * 100  # Convert to percentage for MIR calculation
     mir = (arc * abs(arc)) / (asd * abs(mdd)) if (asd != 0 and mdd != 0) else float('nan')
 
     mn75, mn90 = float('nan'), float('nan')

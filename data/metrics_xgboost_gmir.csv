@@ -1,2 +1,2 @@
-Total Return,Annualized Return,Annualized Volatility,Max Drawdown,Sharpe Ratio,Information Ratio,Modified IR,Mean Stocks (75% coverage),Mean Stocks (90% coverage),strategy,model,objective
-19.049871757955938,7.431498301680861,11.315559843450824,-18.963266215323205,0.19378788975163103,-2.0905369828651996,0.25737335157147645,29.871125611745512,34.247960848287114,XGBoost GMIR,xgboost,gmir
+,Total Return,Annualized Return,Annualized Volatility,Max Drawdown,Sharpe Ratio,Information Ratio,Modified IR,Mean Stocks (75% coverage),Mean Stocks (90% coverage),strategy,model,objective
+0,15.891338709439973,6.250481887179138,11.391409316016535,-19.713390122365837,0.09385743223671059,-0.3468809420549939,0.1739755540507356,30.25285481239804,34.67047308319739,XGBoost GMIR,xgboost,gmir
