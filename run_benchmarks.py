@@ -1,6 +1,7 @@
 """
 Script to run and compare benchmark strategies with existing portfolio strategies.
 """
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -74,10 +75,26 @@ def load_strategy_results(strategy_name: str, benchmark_returns: pd.Series = Non
                     # Calculate tracking error (std of active returns, annualized)
                     tracking_error = active_returns.std() * np.sqrt(252)
                     
-                    # Calculate Information Ratio
+                    # Calculate Information Ratio and Modified Information Ratio
                     if tracking_error > 1e-10:  # Avoid division by zero
                         information_ratio = excess_return_annualized / tracking_error
                         result['information_ratio'] = information_ratio
+                        
+                        # Calculate Modified Information Ratio (adjusting for non-normality)
+                        from scipy.stats import skew, kurtosis
+                        
+                        # Calculate higher moments of active returns
+                        active_skew = skew(active_returns, nan_policy='omit')
+                        active_kurt = kurtosis(active_returns, nan_policy='omit') + 3  # scipy returns excess kurtosis
+                        
+                        # Adjust IR for skewness and kurtosis
+                        # Using the formula: IR_modified = IR * (1 + (skew/6)*IR - ((kurt-3)/24)*IR^2)
+                        ir_squared = information_ratio ** 2
+                        skew_adj = (active_skew / 6) * information_ratio
+                        kurt_adj = ((active_kurt - 3) / 24) * ir_squared
+                        
+                        modified_ir = information_ratio * (1 + skew_adj - kurt_adj)
+                        result['modified_information_ratio'] = modified_ir
                         
                         # Debug output
                         print(f"\nStrategy: {strategy_name}")
@@ -87,6 +104,9 @@ def load_strategy_results(strategy_name: str, benchmark_returns: pd.Series = Non
                         print(f"  Excess Return (Annualized): {excess_return_annualized:.2%}")
                         print(f"  Tracking Error (Annualized): {tracking_error:.2%}")
                         print(f"  Information Ratio: {information_ratio:.2f}")
+                        print(f"  Modified Information Ratio: {modified_ir:.2f}")
+                        print(f"  Active Returns Skewness: {active_skew:.2f}")
+                        print(f"  Active Returns Kurtosis: {active_kurt:.2f}")
                     else:
                         print(f"Warning: Tracking error too small for {strategy_name}")
                 else:
@@ -98,120 +118,196 @@ def load_strategy_results(strategy_name: str, benchmark_returns: pd.Series = Non
         print(f"Error loading strategy {strategy_name}: {str(e)}")
         return None
 
-def plot_all_strategies(benchmark_results: dict, strategy_results: dict, save_path: str = None):
-    """Plot comparison of all strategies with performance table."""
-
-    sns.set_style('whitegrid')
-
-    fig = plt.figure(figsize=(16, 10))
-    gs = fig.add_gridspec(2, 1, height_ratios=[3, 1])
-    ax1 = fig.add_subplot(gs[0])
-
-    all_metrics = []
-    strategy_names = []
-
-    # Color palette
-    colors = {
-        'buy_hold': '#1f77b4',
-        'equal_weight': '#ff7f0e',
-        'arima_garch_gmir': '#2ca02c',
-        'arima_garch_gmv': '#d62728',
-        'xgboost_gmir': '#9467bd',
-        'xgboost_gmv': '#17becf'
-    }
-
-    # Plot benchmarks (dashed)
+def combine_strategy_benchmark_results(benchmark_results: dict, strategy_results: dict) -> dict:
+    """Combine benchmark and strategy results into a single dictionary."""
+    combined = {}
+    
+    # Add benchmarks
     for strategy in ['buy_hold', 'equal_weight']:
         if strategy in benchmark_results:
-            data = benchmark_results[strategy]['portfolio_value']
-            ax1.plot(
-                data.index, data.values,
-                label=f'Benchmark: {strategy.replace("_", " ").title()}',
-                color=colors[strategy],
-                linestyle='--',
-                linewidth=2.2
-            )
-            metrics = calculate_portfolio_metrics(data)
-            metrics['Strategy'] = f'Benchmark: {strategy.replace("_", " ").title()}'
-            # Add information ratio if available
-            if 'information_ratio' in benchmark_results[strategy]:
-                metrics['information_ratio'] = benchmark_results[strategy]['information_ratio']
-            all_metrics.append(metrics)
-            strategy_names.append(metrics['Strategy'])
+            combined[f'benchmark_{strategy}'] = benchmark_results[strategy]
+    
+    # Add strategies
+    for strategy, result in strategy_results.items():
+        if result is not None and 'portfolio_value' in result:
+            combined[f'strategy_{strategy}'] = result
+    
+    return combined
 
-    # Plot strategy results (solid)
-    for name, result in strategy_results.items():
-        if result:
-            data = result['portfolio_value']
-            ax1.plot(
-                data.index, data.values,
-                label=f'Strategy: {name.upper()}',
-                color=colors.get(name, '#333333'),
-                linewidth=2.5
-            )
-            metrics = calculate_portfolio_metrics(data)
-            metrics['Strategy'] = f'Strategy: {name.upper()}'
-            # Add information ratio if available (for strategies loaded from files, we might not have it)
-            if 'information_ratio' in result:
-                metrics['information_ratio'] = result['information_ratio']
-            all_metrics.append(metrics)
-            strategy_names.append(metrics['Strategy'])
-
-    # Title & labels
-    ax1.set_title('Strategy Performance Comparison (2024-01-01 to Present)', fontsize=16, pad=20)
-    ax1.set_xlabel('Date', fontsize=12)
-    ax1.set_ylabel('Portfolio Value (Initial = 1.0)', fontsize=12)
-    ax1.grid(True, alpha=0.2)
-    ax1.legend(fontsize=9, loc='upper left', bbox_to_anchor=(1.02, 1))
-    ax1.text(0.99, 0.01, 'Generated ' + datetime.now().strftime('%Y-%m-%d'),
-             transform=ax1.transAxes, ha='right', fontsize=8, color='gray')
-
-    # Metrics table below plot
-    ax2 = fig.add_subplot(gs[1])
-    ax2.axis('off')
-
-    if all_metrics:
-        df = pd.DataFrame(all_metrics)
-        df = df.set_index('Strategy')
-        
-        # Include information ratio in display if available
-        columns = ['total_return', 'annualized_return', 'annualized_volatility', 'sharpe_ratio', 'max_drawdown']
-        if 'information_ratio' in df.columns:
-            columns.append('information_ratio')
-        
-        display_df = df[columns]
-
-        # Format display
-        display_df = display_df.copy()
-        for col in ['total_return', 'annualized_return', 'annualized_volatility', 'max_drawdown']:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(lambda x: f"{float(x):.2%}" if pd.notna(x) else "N/A")
-        
-        if 'sharpe_ratio' in display_df.columns:
-            display_df['sharpe_ratio'] = display_df['sharpe_ratio'].apply(lambda x: f"{float(x):.2f}" if pd.notna(x) else "N/A")
+def plot_all_strategies(benchmark_results: dict, strategy_results: dict, save_path: str = None):
+    """Plot comparison of all strategies with performance table."""
+    plt.figure(figsize=(16, 9))
+    
+    # Define consistent colors and styles
+    colors = {
+        'buy_hold': '#3498db',
+        'equal_weight': '#2ecc71',
+        'arima_garch_gmir': '#e74c3c',
+        'arima_garch_gmv': '#f39c12',
+        'xgboost_gmir': '#9b59b6',
+        'xgboost_gmv': '#1abc9c'
+    }
+    
+    all_metrics = []
+    strategy_names = []
+    
+    # Combine all results
+    combined_results = combine_strategy_benchmark_results(benchmark_results, strategy_results)
+    
+    # Plot all series
+    for key, result in combined_results.items():
+        if result is None or 'portfolio_value' not in result:
+            continue
             
-        if 'information_ratio' in display_df.columns:
-            display_df['information_ratio'] = display_df['information_ratio'].apply(lambda x: f"{float(x):.2f}" if pd.notna(x) else "N/A")
-
-        table = ax2.table(
-            cellText=display_df.values,
-            rowLabels=display_df.index,
-            colLabels=['Total Return', 'Ann. Return', 'Ann. Vol', 'Sharpe', 'Max DD'] + (['Info Ratio'] if 'information_ratio' in df.columns else []),
-            cellLoc='center',
-            loc='center'
+        data = result['portfolio_value']
+        strategy_type, strategy_name = key.split('_', 1)
+        
+        # Determine line style based on strategy type
+        linestyle = '--' if strategy_type == 'benchmark' else '-'
+        linewidth = 2.2 if strategy_type == 'benchmark' else 2.0
+        alpha = 0.9 if strategy_type == 'benchmark' else 1.0
+        
+        # Get color based on strategy name
+        color = colors.get(strategy_name, '#7f8c8d')
+        
+        # Plot the series
+        plt.plot(
+            data.index, 
+            data.values,
+            label=f'{strategy_type.title()}: {strategy_name.replace("_", " ").title()}',
+            color=color,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            alpha=alpha
         )
-        table.auto_set_font_size(False)
-        table.set_fontsize(9)
-        table.scale(1, 1.6)
-
+        
+        # Calculate metrics
+        metrics = calculate_portfolio_metrics(data)
+        metrics['Strategy'] = f'{strategy_type.title()}: {strategy_name.replace("_", " ").title()}'
+        metrics['Type'] = strategy_type
+        
+        # Add information ratios if available
+        if 'information_ratio' in result:
+            metrics['information_ratio'] = result['information_ratio']
+        if 'modified_information_ratio' in result:
+            metrics['modified_information_ratio'] = result['modified_information_ratio']
+            
+        all_metrics.append(metrics)
+        strategy_names.append(metrics['Strategy'])
+    
+    # Style the plot
+    plt.title('Portfolio Value: Benchmarks vs Strategies', fontsize=16, pad=20)
+    plt.xlabel('Date', fontsize=12, labelpad=10)
+    plt.ylabel('Portfolio Value (Log Scale)', fontsize=12, labelpad=10)
+    plt.yscale('log')
+    plt.grid(True, linestyle='--', alpha=0.3, which='both')
+    
+    # Add watermark
+    plt.figtext(0.5, 0.01, f'Generated on {pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")}', 
+               ha='center', fontsize=8, color='gray', alpha=0.7)
+    
+    # Create a legend with two columns
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=1, fontsize=10)
     plt.tight_layout()
-
+    
+    # Save the plot
     if save_path:
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved strategy comparison plot with table to {save_path}")
-
+        print(f"✓ Saved strategy comparison plot to {save_path}")
+    
+    # Create and save metrics table
+    if all_metrics:
+        create_metrics_table(all_metrics, save_path)
+    
     plt.show()
+
+def create_metrics_table(metrics_list: list, save_path: str = None):
+    """Create a formatted table of performance metrics."""
+    # Convert to DataFrame
+    df = pd.DataFrame(metrics_list).set_index('Strategy')
+    
+    # Define column order and formatting
+    columns = [
+        ('total_return', 'Total Return', '{:.2%}'),
+        ('annualized_return', 'Ann. Return', '{:.2%}'),
+        ('annualized_volatility', 'Ann. Vol', '{:.2%}'),
+        ('sharpe_ratio', 'Sharpe', '{:.2f}'),
+        ('max_drawdown', 'Max DD', '{:.2%}'),
+        ('information_ratio', 'Info Ratio', '{:.2f}'),
+        ('modified_information_ratio', 'Mod. IR', '{:.2f}')
+    ]
+    
+    # Filter available columns
+    available_columns = [col for col, _, _ in columns if col in df.columns]
+    display_columns = [disp for col, disp, _ in columns if col in df.columns]
+    
+    # Create formatted DataFrame
+    df_formatted = pd.DataFrame(index=df.index)
+    for col, _, fmt in columns:
+        if col in df.columns:
+            df_formatted[col] = df[col].apply(lambda x: fmt.format(x) if pd.notna(x) else 'N/A')
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(14, 4 + len(df) * 0.4))
+    ax.axis('off')
+    
+    # Create table
+    table = ax.table(
+        cellText=df_formatted[available_columns].values,
+        rowLabels=df_formatted.index,
+        colLabels=display_columns,
+        cellLoc='center',
+        loc='center',
+        bbox=[0, 0, 1, 1]
+    )
+    
+    # Style the table
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
+    
+    # Highlight best values
+    for i, (col, _, _) in enumerate(columns):
+        if col not in df.columns:
+            continue
+            
+        if col in ['sharpe_ratio', 'information_ratio']:
+            best_idx = df[col].idxmax()
+        else:
+            best_idx = df[col].idxmin() if col == 'max_drawdown' else df[col].idxmax()
+        
+        if best_idx in df.index:
+            row_idx = df.index.get_loc(best_idx)
+            cell = table[(row_idx + 1, i)]
+            cell.set_facecolor('#e6f7e6')
+    
+    # Add title and adjust layout
+    plt.title('Performance Metrics Comparison', fontsize=14, pad=20)
+    plt.tight_layout()
+    
+    # Save metrics table
+    if save_path:
+        metrics_path = save_path.replace('.png', '_metrics.png')
+        plt.savefig(metrics_path, dpi=300, bbox_inches='tight')
+        print(f"✓ Saved metrics table to {metrics_path}")
+    
+    plt.show()
+    
+    # Print summary statistics
+    print("\nPerformance Summary:")
+    print("-" * 105)
+    print(f"{'Strategy':<40} | {'Ann. Return':>10} | {'Ann. Vol':>8} | {'Sharpe':>6} | {'Max DD':>6} | {'Info Ratio':>10} | {'Mod. IR':>8}")
+    print("-" * 105)
+    
+    for idx, row in df.iterrows():
+        print(f"{idx:<40} | "
+              f"{row.get('annualized_return', 0)*100:>9.2f}% | "
+              f"{row.get('annualized_volatility', 0)*100:>7.2f}% | "
+              f"{row.get('sharpe_ratio', 0):>5.2f} | "
+              f"{row.get('max_drawdown', 0)*100:>5.2f}% | "
+              f"{row.get('information_ratio', 'N/A'):>10} | "
+              f"{row.get('modified_information_ratio', 'N/A'):>7}")
+    print("-" * 105)
 
 def calculate_portfolio_metrics(portfolio_data, risk_free_rate: float = 0.05) -> dict:
     """Calculate performance metrics for a portfolio."""
@@ -285,6 +381,10 @@ def load_price_data(use_cached: bool = True) -> pd.DataFrame:
     return prices
 
 def main():
+    # Create necessary directories
+    os.makedirs('plots', exist_ok=True)
+    os.makedirs('data', exist_ok=True)
+    
     # Load price data
     prices = load_price_data(use_cached=True)
     
@@ -299,47 +399,61 @@ def main():
     # Get rebalance dates (aligned with main strategy)
     rebalance_dates = prices.resample('M').last().index
     
-    print(f"Loaded price data for {len(prices.columns)} stocks from {prices.index[0].date()} to {prices.index[-1].date()}")
+    print(f"\n{'='*80}")
+    print(f"PORTFOLIO BACKTESTING COMPARISON")
+    print(f"{'='*80}")
+    print(f"Date Range: {prices.index[0].date()} to {prices.index[-1].date()}")
+    print(f"Number of Assets: {len(prices.columns)}")
+    print(f"Rebalance Frequency: Monthly")
+    print(f"Benchmark Start Date: {benchmark_start_date}")
+    print(f"{'='*80}\n")
     
     print("Calculating benchmark strategies...")
     benchmark_results = calculate_benchmark_returns(
         prices,
-        rebalance_freq='M',  # Monthly rebalancing for equal weight
-        risk_free_rate=0.05,  # 5% risk-free rate for Sharpe ratio
-        benchmark='equal_weight'  # Use equal weight as the benchmark for Information Ratio
+        rebalance_freq='M',
+        risk_free_rate=0.05,
+        benchmark='equal_weight'
     )
     
     # Load benchmark returns for Information Ratio calculation
     benchmark_returns = benchmark_results.get('equal_weight', {}).get('daily_returns')
     
-    # Load existing strategy results
+    print("\nLoading strategy results...")
     strategy_results = {}
-    # ARIMA-GARCH strategies
-    for strategy in ['arima_garch_gmir', 'arima_garch_gmv']:
-        results = load_strategy_results(strategy, benchmark_returns=benchmark_returns)
-        if results is not None:
-            strategy_results[f"arima_garch_{strategy.split('_')[-1]}"] = results
     
-    # XGBoost strategies
-    for strategy in ['xgboost_gmir', 'xgboost_gmv']:
+    # Load ARIMA-GARCH strategies
+    for strategy in ['arima_garch_gmir', 'arima_garch_gmv']:
+        print(f"Loading {strategy}...")
         results = load_strategy_results(strategy, benchmark_returns=benchmark_returns)
         if results is not None:
             strategy_results[strategy] = results
+            print(f"  ✓ Loaded {strategy} with {len(results.get('portfolio_value', []))} data points")
     
-    # Plot comparison
+    # Load XGBoost strategies
+    for strategy in ['xgboost_gmir', 'xgboost_gmv']:
+        print(f"Loading {strategy}...")
+        results = load_strategy_results(strategy, benchmark_returns=benchmark_returns)
+        if results is not None:
+            strategy_results[strategy] = results
+            print(f"  ✓ Loaded {strategy} with {len(results.get('portfolio_value', []))} data points")
+    
+    # Generate comparison plots
+    print("\nGenerating comparison plots...")
     plot_all_strategies(
         benchmark_results,
         strategy_results,
         save_path='plots/strategy_comparison_equity.png'
     )
     
-    # Plot benchmark comparison
+    # Generate benchmark comparison plot
     plot_benchmark_comparison(
         benchmark_results,
         save_path='plots/benchmark_comparison.png'
     )
     
-    # Save individual benchmark plots
+    # Generate individual benchmark plots
+    print("\nGenerating individual benchmark plots...")
     for strategy in ['buy_hold', 'equal_weight']:
         if strategy in benchmark_results:
             plot_equity_and_drawdown(
@@ -348,6 +462,14 @@ def main():
                 safe_name=f'benchmark_{strategy}',
                 first_rebalance_date=rebalance_dates[0] if len(rebalance_dates) > 0 else None
             )
+    
+    print("\n" + "="*80)
+    print("ANALYSIS COMPLETE")
+    print("="*80)
+    print(f"Results saved to the 'plots' directory.")
+    print(f"- Strategy Comparison: plots/strategy_comparison_equity.png")
+    print(f"- Metrics Table: plots/strategy_comparison_equity_metrics.png")
+    print(f"- Benchmark Comparison: plots/benchmark_comparison.png")
 
 if __name__ == "__main__":
     main()

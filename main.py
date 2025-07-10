@@ -93,7 +93,7 @@ END_DATE = '2025-07-01'
 ESTIMATION_WINDOW = 252  
 REBALANCE_FREQ = 'M'     
 FORECAST_HORIZON = 50    
-TRANSACTION_COSTS = [0.0005, 0.001, 0.002, 0.005]  
+TRANSACTION_COSTS = [0.0005, 0.001, 0.002,0.005]  
 MAX_WEIGHT = 0.1         
 BOOTSTRAP_PATHS = 1000   
 RISK_FREE_RATE = 0.05    
@@ -416,6 +416,19 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
 
         if i > ESTIMATION_WINDOW:  
             results['portfolio_value'].loc[date] = results['portfolio_value'].iloc[i-1] * (1 + daily_return)
+
+            
+            # Apply transaction costs to portfolio value series after backtest run
+            for tc in TRANSACTION_COSTS:
+                tc_key = f'portfolio_value_after_tc_{int(tc*10000)}bps'
+                results[tc_key] = apply_transaction_costs(
+                    portfolio_values=results['portfolio_value'],
+                    turnover_series=results['turnover'],
+                    rebalance_dates=rebalance_dates,
+                    tc_rate=tc
+                )
+                print(f"✓ Applied {tc*100:.2f}% transaction cost adjustment: saved as {tc_key}")
+
         else:
             results['portfolio_value'].loc[date] = 1.0 * (1 + daily_return)
 
@@ -430,6 +443,9 @@ def calculate_performance_metrics(portfolio_values: pd.Series,
                                weights_history: pd.DataFrame = None,
                                benchmark_returns: pd.Series = None,
                                freq: int = 252) -> Dict[str, float]:
+
+
+                        
     
     if len(portfolio_values) < 2:
         return {}
@@ -587,12 +603,66 @@ def apply_transaction_costs(portfolio_values: pd.Series, turnover_series: pd.Ser
             adjusted_values.loc[date:] *= (1 - tc_rate * turnover_series[date])
     return adjusted_values
 
-def save_backtest_results(results: dict, strategy_name: str, first_rebalance_date: pd.Timestamp = None):
+def calculate_tc_metrics(results, benchmark_returns, weights_history, strategy_name, first_rebalance_date):
+    """Calculate performance metrics for each transaction cost level."""
+    metrics_list = []
+    freq = 252  # Trading days in a year
+    safe_name = strategy_name.lower().replace('-', '_').replace(' ', '_')
 
+    for tc in TRANSACTION_COSTS:
+        tc_key = f'portfolio_value_after_tc_{int(tc*10000)}bps'
+        if tc_key in results:
+            print(f"\nCalculating metrics for {strategy_name} at {tc*100:.2f}% TC")
+
+            portfolio_values = results[tc_key]
+            daily_returns = portfolio_values.pct_change().fillna(0)
+
+            # Trim to post-rebalance period if applicable
+            if first_rebalance_date is not None:
+                portfolio_values = portfolio_values[portfolio_values.index >= first_rebalance_date]
+                daily_returns = daily_returns[daily_returns.index >= first_rebalance_date]
+
+            metrics = calculate_performance_metrics(
+                portfolio_values=portfolio_values,
+                daily_returns=daily_returns,
+                weights_history=weights_history,
+                benchmark_returns=benchmark_returns,
+                freq=freq
+            )
+            metrics['Transaction Cost (%)'] = tc * 100
+            metrics_list.append(metrics)
+
+    if metrics_list:
+        tc_metrics_df = pd.DataFrame(metrics_list)
+        csv_path = f"data/tc_metrics_{safe_name}.csv"
+        tc_metrics_df.to_csv(csv_path, index=False)
+        print(f"\n✓ Saved TC-adjusted metrics for {strategy_name} to {csv_path}")
+
+    return
+
+def save_backtest_results(results: dict, strategy_name: str, first_rebalance_date: pd.Timestamp = None):
+    """Save backtest results to files."""
     safe_name = strategy_name.lower().replace('-', '_').replace(' ', '_')
 
     portfolio_values = results['portfolio_value']
     daily_returns = results['daily_returns']
+
+    save_dataframe(results['turnover'], f'data/turnover_{safe_name}.csv')
+    save_dataframe(results['mn75'], f'data/mn75_{safe_name}.csv')
+    save_dataframe(results['mn90'], f'data/mn90_{safe_name}.csv')
+
+    # Save transaction cost sensitivity data
+    tc_metrics = {}
+    for tc in TRANSACTION_COSTS:
+        tc_key = f'portfolio_value_after_tc_{int(tc*10000)}bps'
+        if tc_key in results:
+            final_value = results[tc_key].iloc[-1]
+            tc_metrics[f'{tc*100:.2f}%'] = final_value
+    if tc_metrics:
+        save_dataframe(pd.DataFrame.from_dict(tc_metrics, orient='index', columns=['Final Value']),
+                     f'data/tc_sensitivity_{safe_name}.csv')
+
+
     
     if first_rebalance_date is not None:
         portfolio_values = portfolio_values[portfolio_values.index >= first_rebalance_date]
@@ -669,12 +739,17 @@ def main(use_cached_data: bool = True):
         metrics['model'] = model_type
         metrics['objective'] = objective
 
-        all_results[strategy_name] = results
-        all_metrics_list.append(metrics)
-
-        results['metrics'] = metrics
 
         save_backtest_results(results, strategy_name, first_rebalance_date)
+        
+        # Calculate metrics for each transaction cost level
+        calculate_tc_metrics(
+            results=results,
+            benchmark_returns=benchmark_returns,
+            weights_history=results.get('weights'),
+            strategy_name=strategy_name,
+            first_rebalance_date=first_rebalance_date
+        )
 
         print(f"\n{strategy_name} Performance:")
         print("-" * 50)
