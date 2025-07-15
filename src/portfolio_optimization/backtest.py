@@ -11,7 +11,8 @@ import seaborn as sns
 
 from portfolio_optimization.settings import (
     START_DATE, END_DATE, REBALANCE_FREQ, ESTIMATION_WINDOW,
-    NIFTY50_TICKERS, DATA_DIR, PLOTS_DIR, TRANSACTION_COSTS
+    NIFTY50_TICKERS, DATA_DIR, PLOTS_DIR, TRANSACTION_COSTS,
+    ARIMA_ORDER, XGB_PARAMS, XGB_LAGS, MAX_WEIGHT, RISK_FREE_RATE
 )
 from portfolio_optimization.forecasting.models import ARIMAGARCH, XGBoost
 from portfolio_optimization.optimizer import PortfolioOptimizer
@@ -42,8 +43,9 @@ class BacktestEngine:
                 
                 results[strategy] = self.run_backtest(log_returns, rebalance_dates, model_type, objective)
                 
-                # Calculate strategy summary metrics
-                self._calculate_strategy_summary(results[strategy], strategy)
+                # Calculate summary metrics
+                summary = self._calculate_strategy_summary(results[strategy], strategy)
+                results[strategy]['summary'] = summary
                 print(f"\n{'='*100}\nSummary Performance ({rebalance_dates[0]} to {rebalance_dates[-1]}):")
                 print("- Cumulative Return: {:.2%}".format(results[strategy]['summary']['cumulative_return']))
                 print("- Annualized Return: {:.2%}".format(results[strategy]['summary']['annualized_return']))
@@ -53,10 +55,10 @@ class BacktestEngine:
                 print(f"{'='*100}")
                 
                 # Print final summary and performance metrics
-                self._print_summary_performance(results[strategy])
-                self._print_monthly_rebalances(results[strategy])
+                self._print_summary_performance(results[strategy], strategy)
+                self._print_monthly_rebalances(results[strategy], strategy)
                 self._print_model_diagnostics(results[strategy], strategy.split('_')[0])
-                self._print_weight_distribution(results[strategy])
+                self._print_weight_distribution(results[strategy], strategy)
                 
                 print(f"{'='*100}\n")
                 
@@ -69,44 +71,45 @@ class BacktestEngine:
         os.makedirs(PLOTS_DIR, exist_ok=True)
         
     def _calculate_strategy_summary(self, results, strategy):
-        """Calculate summary metrics for a strategy."""
-        returns = results['daily_returns'].dropna()
+        """Calculate summary performance metrics."""
+        returns = results['daily_returns']
         
+        if len(returns) == 0:
+            return None
+            
         # Calculate cumulative return
-        cum_return = (1 + returns).prod() - 1
+        cumulative_return = (returns + 1).prod() - 1
         
         # Calculate annualized return
         n_days = len(returns)
-        annualized_return = (1 + cum_return) ** (252/n_days) - 1
+        annualized_return = (1 + cumulative_return) ** (252/n_days) - 1
         
         # Calculate annualized volatility
-        daily_vol = returns.std()
-        annualized_vol = daily_vol * np.sqrt(252)
+        volatility = returns.std() * np.sqrt(252)
         
         # Calculate Sharpe ratio
-        sharpe_ratio = annualized_return / annualized_vol
+        sharpe_ratio = annualized_return / volatility
         
-        # Calculate maximum drawdown
-        portfolio_value = results['portfolio_value'].dropna()
-        rolling_max = portfolio_value.rolling(window=len(portfolio_value), min_periods=1).max()
-        drawdown = (portfolio_value - rolling_max) / rolling_max
+        # Calculate max drawdown
+        cum_returns = (returns + 1).cumprod()
+        peak = cum_returns.expanding().max()
+        drawdown = (cum_returns - peak) / peak
         max_drawdown = drawdown.min()
         
-        # Store summary metrics
-        results['summary'] = {
-            'cumulative_return': cum_return,
+        return {
+            'cumulative_return': cumulative_return,
             'annualized_return': annualized_return,
-            'annualized_volatility': annualized_vol,
+            'annualized_volatility': volatility,
             'sharpe_ratio': sharpe_ratio,
             'max_drawdown': max_drawdown
         }
         
-    def _print_monthly_rebalances(self, results):
+    def _print_monthly_rebalances(self, results, strategy):
         """Print monthly rebalances in a formatted table."""
-        print("\nMonthly Rebalances:")
+        print(f"\n{strategy} Monthly Rebalances:")
         print("=" * 120)
-        print("| Month | Portfolio Value | Return | Volatility | Assets | Max Weight | Mean Weight |")
-        print("|-------|-----------------|--------|------------|--------|------------|------------|")
+        print("| Month | Portfolio Value | Return | Volatility | Assets | Max Weight | Mean Weight | MN75% | MN90% |")
+        print("|-------|-----------------|--------|------------|--------|------------|------------|--------|--------|")
         
         # Get all rebalance dates
         rebalance_dates = results['weights'].index[results['weights'].notna().any(axis=1)]
@@ -178,67 +181,120 @@ class BacktestEngine:
         
         # Print the monthly data
         for data in monthly_data:
-            print(f"| {data['month']} | {data['value']:14.4f} | {data['return']:6.2%} | {data['volatility']:10.2%} | {data['assets']:6} | {data['max_weight']:10} | {data['mean_weight']:10.2%} |")
+            month = data['month']
+            monthly_value = data['value']
+            monthly_return = data['return']
+            monthly_volatility = data['volatility']
+            assets_count = data['assets']
+            max_weight = data['max_weight']
+            mean_weight = data['mean_weight']
+            mn75 = int(mean_weight * 75)
+            mn90 = int(mean_weight * 90)
+            print(f"| {month} | {monthly_value:15.4f} | {monthly_return:6.2%} | {monthly_volatility:10.2%} | {assets_count:6d} | {max_weight:10.2%} | {mean_weight:10.2%} | {mn75:6d} | {mn90:6d} |")
         
         print("=" * 120)
 
-    def _print_model_diagnostics(self, results, model_type):
-        """Print model-specific diagnostics."""
-        print("\nModel Diagnostics:")
-        print("-" * 80)
-        if model_type == 'xgboost':
-            print("XGBoost Feature Importance:")
-            print("-" * 80)
-            # Add XGBoost specific diagnostics
-        else:
-            print("ARIMA-GARCH Parameters:")
-            print("-" * 80)
-            # Add ARIMA-GARCH specific diagnostics
-
-    def _print_weight_distribution(self, results):
-        """Print weight distribution metrics."""
-        weights = results['weights'].iloc[-1]
-        non_zero_weights = weights[weights > 0]
-        
-        print("\nWeight Distribution:")
-        print("-" * 80)
-        print(f"- Min: {non_zero_weights.min():.2%}")
-        print(f"- Max: {non_zero_weights.max():.2%}")
-        print(f"- Mean: {non_zero_weights.mean():.2%}")
-        print(f"- Std: {non_zero_weights.std():.2%}")
-        print(f"- Assets with Weight > 0: {len(non_zero_weights)}")
-        print(f"- Assets at Max Weight (10%): {(weights >= 0.1).sum()}")
-        print(f"- 75th Percentile Weight: {non_zero_weights.quantile(0.75):.2%} ({self._get_min_stocks(weights, 0.75)} assets)")
-        print(f"- 90th Percentile Weight: {non_zero_weights.quantile(0.90):.2%} ({self._get_min_stocks(weights, 0.90)} assets)")
-        print("Top Assets:")
-        top_assets = non_zero_weights.nlargest(5)
-        for asset, weight in top_assets.items():
-            print(f"- {asset}: {weight:.2%}")
-        print("-" * 80)
-
-    def _print_summary_performance(self, results):
+    def _print_summary_performance(self, results, strategy):
         """Print summary performance metrics."""
+        print(f"\n{strategy} Summary Performance:")
+        print("=" * 120)
+        
+        # Calculate summary metrics
         summary = results['summary']
-        print("\nSummary Performance:")
-        print("=" * 80)
+        if summary is None:
+            print("No data available for summary metrics")
+            return
+            
+        # Print summary metrics with better formatting
         print(f"Period: {results['portfolio_value'].index[0]} to {results['portfolio_value'].index[-1]}")
         print(f"- Cumulative Return: {summary['cumulative_return']:.2%}")
         print(f"- Annualized Return: {summary['annualized_return']:.2%}")
         print(f"- Annualized Volatility: {summary['annualized_volatility']:.2%}")
         print(f"- Sharpe Ratio: {summary['sharpe_ratio']:.2f}")
         print(f"- Max Drawdown: {summary['max_drawdown']:.2%}")
-        print("=" * 80)
         
-    def _print_comparison_table(self, results):
+        print("=" * 120)
+        
+    def _print_model_diagnostics(self, results, strategy):
+        """Print model-specific diagnostics."""
+        model_type = strategy.split('_')[0]
+        print(f"\n{strategy} Model Diagnostics:")
+        print("=" * 120)
+        
+        # Add ARIMA-GARCH specific diagnostics
+        if model_type == 'arima':
+            print("ARIMA-GARCH Model Parameters:")
+            print("=" * 80)
+            print(f"ARIMA Order: {ARIMA_ORDER}")
+            print("GARCH Order: (1, 1)")
+            print("=" * 80)
+            
+        # Add XGBoost specific diagnostics
+        elif model_type == 'xgboost':
+            print("XGBoost Model Parameters:")
+            print("=" * 80)
+            print(f"N_estimators: {XGB_PARAMS['n_estimators']}")
+            print(f"Max_depth: {XGB_PARAMS['max_depth']}")
+            print(f"Learning_rate: {XGB_PARAMS['learning_rate']}")
+            print(f"Subsample: {XGB_PARAMS['subsample']}")
+            print(f"Colsample_bytree: {XGB_PARAMS['colsample_bytree']}")
+            print(f"Lags: {XGB_LAGS}")
+            print("=" * 80)
+            
+        print("=" * 120)
+
+    def _print_weight_distribution(self, results, strategy):
+        """Print weight distribution metrics."""
+        weights = results['weights'].iloc[-1]
+        non_zero_weights = weights[weights > 0]
+        
+        print(f"\n{strategy} Weight Distribution:")
+        print("=" * 120)
+        print(f"- Min Weight: {non_zero_weights.min():.2%}")
+        print(f"- Max Weight: {non_zero_weights.max():.2%}")
+        print(f"- Mean Weight: {non_zero_weights.mean():.2%}")
+        print(f"- Std Weight: {non_zero_weights.std():.2%}")
+        print(f"- # Assets > 0: {len(non_zero_weights)}")
+        print(f"- # Assets at Max: {sum(weights == self.optimizer.max_weight)}")
+        print(f"- MN75%: {int(np.percentile(non_zero_weights, 75))}")
+        print(f"- MN90%: {int(np.percentile(non_zero_weights, 90))}")
+        print("=" * 120)
+        
+    def _print_comparison_table(self, all_results):
         """Print comparison table across all strategies."""
         print("\nComparison Across Strategies:")
         print("=" * 120)
-        print("| Strategy          | Cumulative Return | Annualized Return | Annualized Volatility | Sharpe Ratio |")
-        print("|-------------------|-------------------|-------------------|-----------------------|--------------|")
+        print("| Strategy          | Cumulative Return | Annualized Return | Annualized Volatility | Sharpe Ratio | Max Drawdown |")
+        print("|-------------------|-------------------|-------------------|-----------------------|--------------|--------------|")
         
-        for strategy in ['xgboost_gmir', 'xgboost_gmv', 'arima_gmir', 'arima_gmv']:
-            summary = results[strategy]['summary']
-            print(f"| {strategy.upper():<20} | {summary['cumulative_return']:^14.2%} | {summary['annualized_return']:^14.2%} | {summary['annualized_volatility']:^18.2%} | {summary['sharpe_ratio']:^12.2f} |")
+        # Sort strategies by cumulative return
+        sorted_strategies = sorted(all_results.items(), 
+                                 key=lambda x: self._calculate_strategy_summary(x[1], strategy='summary')['cumulative_return'],
+                                 reverse=True)
+        
+        # Calculate average metrics across all strategies
+        avg_metrics = {
+            'cumulative_return': np.mean([self._calculate_strategy_summary(r, strategy='summary')['cumulative_return'] 
+                                       for _, r in all_results.items()]),
+            'annualized_return': np.mean([self._calculate_strategy_summary(r, strategy='summary')['annualized_return'] 
+                                       for _, r in all_results.items()]),
+            'annualized_volatility': np.mean([self._calculate_strategy_summary(r, strategy='summary')['annualized_volatility'] 
+                                           for _, r in all_results.items()]),
+            'sharpe_ratio': np.mean([self._calculate_strategy_summary(r, strategy='summary')['sharpe_ratio'] 
+                                  for _, r in all_results.items()]),
+            'max_drawdown': np.mean([self._calculate_strategy_summary(r, strategy='summary')['max_drawdown'] 
+                                  for _, r in all_results.items()])
+        }
+        
+        # Print each strategy's results
+        for strategy, results in sorted_strategies:
+            summary = self._calculate_strategy_summary(results, strategy='summary')
+            print(f"| {strategy:<19} | {summary['cumulative_return']:17.2%} | {summary['annualized_return']:17.2%} | {summary['annualized_volatility']:21.2%} | {summary['sharpe_ratio']:12.2f} | {summary['max_drawdown']:12.2%} |")
+        
+        # Print average metrics
+        print("-" * 120)
+        print(f"| Average           | {avg_metrics['cumulative_return']:17.2%} | {avg_metrics['annualized_return']:17.2%} | {avg_metrics['annualized_volatility']:21.2%} | {avg_metrics['sharpe_ratio']:12.2f} | {avg_metrics['max_drawdown']:12.2%} |")
+        
         print("=" * 120)
         
     def prepare_data(self):
