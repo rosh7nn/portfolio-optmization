@@ -198,8 +198,6 @@ class BacktestEngine:
         """Print summary performance metrics."""
         print(f"\n{strategy} Summary Performance:")
         print("=" * 120)
-        
-        # Calculate summary metrics
         summary = results['summary']
         if summary is None:
             print("No data available for summary metrics")
@@ -207,12 +205,13 @@ class BacktestEngine:
             
         # Print summary metrics with better formatting
         print(f"Period: {results['portfolio_value'].index[0]} to {results['portfolio_value'].index[-1]}")
+        print("-" * 120)
         print(f"- Cumulative Return: {summary['cumulative_return']:.2%}")
         print(f"- Annualized Return: {summary['annualized_return']:.2%}")
         print(f"- Annualized Volatility: {summary['annualized_volatility']:.2%}")
         print(f"- Sharpe Ratio: {summary['sharpe_ratio']:.2f}")
         print(f"- Max Drawdown: {summary['max_drawdown']:.2%}")
-        
+        print("=" * 120)
         print("=" * 120)
         
     def _print_model_diagnostics(self, results, strategy):
@@ -242,6 +241,7 @@ class BacktestEngine:
             print("=" * 80)
             
         print("=" * 120)
+        print("=" * 120)
 
     def _print_weight_distribution(self, results, strategy):
         """Print weight distribution metrics."""
@@ -250,6 +250,7 @@ class BacktestEngine:
         
         print(f"\n{strategy} Weight Distribution:")
         print("=" * 120)
+        print("-" * 120)
         print(f"- Min Weight: {non_zero_weights.min():.2%}")
         print(f"- Max Weight: {non_zero_weights.max():.2%}")
         print(f"- Mean Weight: {non_zero_weights.mean():.2%}")
@@ -258,6 +259,7 @@ class BacktestEngine:
         print(f"- # Assets at Max: {sum(weights == self.optimizer.max_weight)}")
         print(f"- MN75%: {int(np.percentile(non_zero_weights, 75))}")
         print(f"- MN90%: {int(np.percentile(non_zero_weights, 90))}")
+        print("=" * 120)
         print("=" * 120)
         
     def _print_comparison_table(self, all_results):
