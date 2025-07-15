@@ -72,37 +72,48 @@ class BacktestEngine:
         
     def _calculate_strategy_summary(self, results, strategy):
         """Calculate summary performance metrics."""
-        returns = results['daily_returns']
-        
-        if len(returns) == 0:
-            return None
+        try:
+            returns = results['daily_returns']
+            if returns is None or len(returns) < 2:
+                raise ValueError("Insufficient returns data")
             
-        # Calculate cumulative return
-        cumulative_return = (returns + 1).prod() - 1
-        
-        # Calculate annualized return
-        n_days = len(returns)
-        annualized_return = (1 + cumulative_return) ** (252/n_days) - 1
-        
-        # Calculate annualized volatility
-        volatility = returns.std() * np.sqrt(252)
-        
-        # Calculate Sharpe ratio
-        sharpe_ratio = annualized_return / volatility
-        
-        # Calculate max drawdown
-        cum_returns = (returns + 1).cumprod()
-        peak = cum_returns.expanding().max()
-        drawdown = (cum_returns - peak) / peak
-        max_drawdown = drawdown.min()
-        
-        return {
-            'cumulative_return': cumulative_return,
-            'annualized_return': annualized_return,
-            'annualized_volatility': volatility,
-            'sharpe_ratio': sharpe_ratio,
-            'max_drawdown': max_drawdown
-        }
+            # Calculate cumulative return
+            cumulative_return = (returns + 1).prod() - 1
+            
+            # Calculate annualized return
+            n_days = len(returns)
+            annualized_return = (1 + cumulative_return) ** (252/n_days) - 1
+            
+            # Calculate annualized volatility
+            volatility = returns.std() * np.sqrt(252)
+            sharpe_ratio = annualized_return / volatility if volatility > 0 else 0
+            
+            # Calculate drawdown
+            if len(returns) > 1:
+                cum_returns = (returns + 1).cumprod()
+                peak = cum_returns.expanding().max()
+                drawdown = (cum_returns - peak) / peak
+                max_drawdown = drawdown.min()
+            else:
+                max_drawdown = 0
+            
+            return {
+                'cumulative_return': cumulative_return,
+                'annualized_return': annualized_return,
+                'annualized_volatility': volatility,
+                'sharpe_ratio': sharpe_ratio,
+                'max_drawdown': max_drawdown
+            }
+            
+        except Exception as e:
+            print(f"Error calculating summary metrics for {strategy}: {str(e)}")
+            return {
+                'cumulative_return': 0,
+                'annualized_return': 0,
+                'annualized_volatility': 0,
+                'sharpe_ratio': 0,
+                'max_drawdown': 0
+            }
         
     def _print_monthly_rebalances(self, results, strategy):
         """Print monthly rebalances in a formatted table."""
@@ -114,80 +125,127 @@ class BacktestEngine:
         # Get all rebalance dates
         rebalance_dates = results['weights'].index[results['weights'].notna().any(axis=1)]
         
-        # Group by month and calculate monthly returns
-        monthly_data = []
-        current_month = None
-        current_month_dates = []
-        monthly_value = []
-        monthly_returns = []
-        
-        # Sort rebalance dates to ensure proper monthly grouping
-        rebalance_dates = sorted(rebalance_dates)
-        
-        for date in rebalance_dates:
-            if date.month != current_month:
-                if current_month is not None:
-                    # Calculate monthly return and volatility
-                    monthly_return = (monthly_value[-1] / monthly_value[0] - 1) if len(monthly_value) > 0 else 0
-                    monthly_vol = np.std(monthly_returns) * np.sqrt(252) if len(monthly_returns) > 1 else 0
+        try:
+            # Group by month and calculate monthly returns
+            monthly_data = []
+            current_month = None
+            current_month_dates = []
+            monthly_value = []
+            monthly_returns = []
+            
+            # Sort rebalance dates to ensure proper monthly grouping
+            rebalance_dates = sorted(rebalance_dates)
+            
+            for date in rebalance_dates:
+                if date.month != current_month:
+                    if current_month is not None:
+                        # Calculate monthly return and volatility
+                        if len(monthly_value) > 0:
+                            monthly_return = (monthly_value[-1] / monthly_value[0] - 1)
+                        else:
+                            monthly_return = 0
+                            
+                        if len(monthly_returns) > 1:
+                            monthly_vol = np.std(monthly_returns) * np.sqrt(252)
+                        else:
+                            monthly_vol = 0
+                            
+                        # Calculate weight distribution metrics using the first date of the month
+                        if len(current_month_dates) > 0:
+                            try:
+                                weights = results['weights'].loc[current_month_dates[0]]
+                                non_zero_weights = weights[weights > 0]
+                                max_weight_assets = sum(weights == self.optimizer.max_weight)
+                                mean_weight = weights[non_zero_weights.index].mean()
+                            except Exception as e:
+                                print(f"Error calculating weights for {current_month_dates[0]}: {str(e)}")
+                                non_zero_weights = pd.Series()
+                                max_weight_assets = 0
+                                mean_weight = 0
+                        else:
+                            non_zero_weights = pd.Series()
+                            max_weight_assets = 0
+                            mean_weight = 0
+                            
+                        monthly_data.append({
+                            'month': current_month_dates[0].strftime('%Y-%m') if current_month_dates else '',
+                            'value': monthly_value[-1] if monthly_value else 0,
+                            'return': monthly_return,
+                            'volatility': monthly_vol,
+                            'assets': len(non_zero_weights),
+                            'max_weight': max_weight_assets,
+                            'mean_weight': mean_weight
+                        })
                     
-                    # Calculate weight distribution metrics using the first date of the month
-                    weights = results['weights'].loc[current_month_dates[0]]
-                    non_zero_weights = weights[weights > 0]
-                    max_weight_assets = sum(weights == self.optimizer.max_weight)
-                    mean_weight = weights[non_zero_weights.index].mean()
-                    
-                    monthly_data.append({
-                        'month': current_month_dates[0].strftime('%Y-%m'),
-                        'value': monthly_value[-1],
-                        'return': monthly_return,
-                        'volatility': monthly_vol,
-                        'assets': len(non_zero_weights),
-                        'max_weight': max_weight_assets,
-                        'mean_weight': mean_weight
-                    })
+                    current_month = date.month
+                    current_month_dates = []
+                    monthly_value = []
+                    monthly_returns = []
                 
-                current_month = date.month
-                current_month_dates = []
-                monthly_value = []
-                monthly_returns = []
+                current_month_dates.append(date)
+                try:
+                    portfolio_value = results['portfolio_value'].loc[date]
+                    daily_return = results['daily_returns'].loc[date]
+                    monthly_value.append(portfolio_value)
+                    monthly_returns.append(daily_return)
+                except Exception as e:
+                    print(f"Error processing date {date}: {str(e)}")
+                    continue
             
-            current_month_dates.append(date)
-            portfolio_value = results['portfolio_value'].loc[date]
-            daily_return = results['daily_returns'].loc[date]
-            monthly_value.append(portfolio_value)
-            monthly_returns.append(daily_return)
+            # Add the last month's data
+            if len(monthly_value) > 0:
+                monthly_return = (monthly_value[-1] / monthly_value[0] - 1)
+                if len(monthly_returns) > 1:
+                    monthly_vol = np.std(monthly_returns) * np.sqrt(252)
+                else:
+                    monthly_vol = 0
+                    
+                # Calculate weight distribution metrics using the first date of the month
+                if len(current_month_dates) > 0:
+                    try:
+                        weights = results['weights'].loc[current_month_dates[0]]
+                        non_zero_weights = weights[weights > 0]
+                        max_weight_assets = sum(weights == self.optimizer.max_weight)
+                        mean_weight = weights[non_zero_weights.index].mean()
+                    except Exception as e:
+                        print(f"Error calculating weights for {current_month_dates[0]}: {str(e)}")
+                        non_zero_weights = pd.Series()
+                        max_weight_assets = 0
+                        mean_weight = 0
+                else:
+                    non_zero_weights = pd.Series()
+                    max_weight_assets = 0
+                    mean_weight = 0
+                    
+                monthly_data.append({
+                    'month': current_month_dates[0].strftime('%Y-%m') if current_month_dates else '',
+                    'value': monthly_value[-1],
+                    'return': monthly_return,
+                    'volatility': monthly_vol,
+                    'assets': len(non_zero_weights),
+                    'max_weight': max_weight_assets,
+                    'mean_weight': mean_weight
+                })
             
-        # Add the last month's data
-        if len(monthly_value) > 0:
-            monthly_return = (monthly_value[-1] / monthly_value[0] - 1)
-            monthly_vol = np.std(monthly_returns) * np.sqrt(252) if len(monthly_returns) > 1 else 0
+            # Print the monthly data
+            for data in monthly_data:
+                try:
+                    month = data['month']
+                    monthly_value = data['value']
+                    monthly_return = data['return']
+                    monthly_volatility = data['volatility']
+                    assets_count = data['assets']
+                    max_weight = data['max_weight']
+                    mean_weight = data['mean_weight']
+                    
+                    if not pd.isna(monthly_value) and not pd.isna(monthly_return) and not pd.isna(monthly_volatility):
+                        print(f"| {month} | {monthly_value:15.4f} | {monthly_return:6.2%} | {monthly_volatility:10.2%} | {assets_count:6d} | {max_weight:10.2%} | {mean_weight:10.2%} |")
+                except Exception as e:
+                    print(f"Error printing monthly data: {str(e)}")
+                    continue
             
-            # Calculate weight distribution metrics using the first date of the month
-            weights = results['weights'].loc[current_month_dates[0]]
-            non_zero_weights = weights[weights > 0]
-            max_weight_assets = sum(weights == self.optimizer.max_weight)
-            mean_weight = weights[non_zero_weights.index].mean()
-            
-            monthly_data.append({
-                'month': current_month_dates[0].strftime('%Y-%m'),
-                'value': monthly_value[-1],
-                'return': monthly_return,
-                'volatility': monthly_vol,
-                'assets': len(non_zero_weights),
-                'max_weight': max_weight_assets,
-                'mean_weight': mean_weight
-            })
-        
-        # Print the monthly data
-        for data in monthly_data:
-            month = data['month']
-            monthly_value = data['value']
-            monthly_return = data['return']
-            monthly_volatility = data['volatility']
-            assets_count = data['assets']
-            max_weight = data['max_weight']
-            mean_weight = data['mean_weight']
+        except Exception as e:
+            print(f"Error in monthly rebalances calculation: {str(e)}")
             mn75 = int(mean_weight * 75)
             mn90 = int(mean_weight * 90)
             print(f"| {month} | {monthly_value:15.4f} | {monthly_return:6.2%} | {monthly_volatility:10.2%} | {assets_count:6d} | {max_weight:10.2%} | {mean_weight:10.2%} | {mn75:6d} | {mn90:6d} |")
@@ -300,23 +358,36 @@ class BacktestEngine:
         print("=" * 120)
         
     def prepare_data(self):
-        prices = None
-        log_returns = None
-        
-        if self.use_cached_data:
-            log_returns = self._load_log_returns()
-        
-        if log_returns is None or log_returns.empty:
+        try:
+            prices = None
+            log_returns = None
+            
             if self.use_cached_data:
-                prices = self._load_data()
-            if prices is None or prices.empty:
-                prices = self._download_prices()
-                self._save_data(prices)
-            log_returns = self._compute_log_returns(prices)
-            self._save_log_returns(log_returns)
-        
-        rebalance_dates = log_returns.resample(REBALANCE_FREQ).last().index
-        return prices, log_returns, rebalance_dates
+                log_returns = self._load_log_returns()
+                
+            if log_returns is None or log_returns.empty:
+                if self.use_cached_data:
+                    prices = self._load_data()
+                if prices is None or prices.empty:
+                    print("Downloading fresh data...")
+                    prices = self._download_prices()
+                    if prices is None or prices.empty:
+                        raise ValueError("Failed to download price data")
+                    self._save_data(prices)
+                log_returns = self._compute_log_returns(prices)
+                if log_returns is None or log_returns.empty:
+                    raise ValueError("Failed to compute log returns")
+                self._save_log_returns(log_returns)
+            
+            rebalance_dates = log_returns.resample(REBALANCE_FREQ).last().index
+            if len(rebalance_dates) < 2:
+                raise ValueError(f"Insufficient rebalance dates: {len(rebalance_dates)}")
+            
+            return prices, log_returns, rebalance_dates
+            
+        except Exception as e:
+            print(f"Error in data preparation: {str(e)}")
+            raise
         
     def _download_prices(self):
         print(f"Downloading price data from {START_DATE} to {END_DATE}...")
