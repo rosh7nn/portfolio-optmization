@@ -1,0 +1,3 @@
+[console_scripts]
+portfolio-optimize = portfolio_optimization.cli:main
+

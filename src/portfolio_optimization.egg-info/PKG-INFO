@@ -1,0 +1,65 @@
+Metadata-Version: 2.1
+Name: portfolio-optimization
+Version: 0.1.0
+Summary: A comprehensive portfolio optimization framework with multiple forecasting models and optimization strategies
+Home-page: https://github.com/yourusername/portfolio-optimization
+Author: Your Name
+Author-email: your.email@example.com
+License: UNKNOWN
+Platform: UNKNOWN
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Financial and Insurance Industry
+Classifier: Topic :: Office/Business :: Financial :: Investment
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+
+# Portfolio Optimization System
+
+A comprehensive portfolio optimization framework that combines multiple forecasting models with advanced optimization strategies for NIFTY 50 stocks.
+
+## Features
+
+- ARIMA-GARCH and XGBoost forecasting models
+- Mean-Variance optimization with GMIR and GMV objectives
+- Monthly rebalancing strategy
+- Performance metrics calculation
+- Professional plotting and visualization
+
+## Installation
+
+1. Create a virtual environment:
+```bash
+python -m venv venv
+source venv/bin/activate  # On Unix/macOS
+```
+
+2. Install the package:
+```bash
+pip install -e .
+```
+
+## Usage
+
+Run the portfolio optimization:
+```bash
+python -m portfolio_optimization.cli
+```
+
+Or use the command line interface:
+```bash
+portfolio-optimize
+```
+
+## Configuration
+
+The system uses the following configuration parameters:
+- Start Date: 2023-01-01
+- End Date: 2025-07-01
+- Rebalance Frequency: Monthly
+- Estimation Window: 252 trading days
+- Maximum Weight per Asset: 10%
+- Risk-Free Rate: 5%
+
+
