@@ -294,13 +294,15 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
     print(f"Total trading days: {len(log_returns)}")
     print(f"Estimation window: {ESTIMATION_WINDOW} days")
     print(f"Max weight constraint: {MAX_WEIGHT:.1%}\n{'='*80}")
+    # Initialize all series with full date range
+    date_range = pd.date_range(start=log_returns.index[0], end=log_returns.index[-1], freq='B')
     results = {
-        'portfolio_value': pd.Series(1.0, index=log_returns.index),
-        'daily_returns': pd.Series(0.0, index=log_returns.index),
-        'turnover': pd.Series(0.0, index=log_returns.index),
-        'weights': pd.DataFrame(0.0, index=log_returns.index, columns=log_returns.columns),
-        'mn75': pd.Series(0.0, index=log_returns.index, dtype=float),
-        'mn90': pd.Series(0.0, index=log_returns.index, dtype=float)
+        'portfolio_value': pd.Series(1.0, index=date_range),
+        'daily_returns': pd.Series(0.0, index=date_range),
+        'turnover': pd.Series(0.0, index=date_range),
+        'weights': pd.DataFrame(0.0, index=date_range, columns=log_returns.columns),
+        'mn75': pd.Series(0.0, index=date_range, dtype=float),
+        'mn90': pd.Series(0.0, index=date_range, dtype=float)
     }
     current_weights = pd.Series(0.0, index=log_returns.columns)
     current_weights[:] = 1.0 / len(log_returns.columns)
@@ -308,10 +310,17 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
     print(f"Sum: {current_weights.sum():.6f}")
     print(f"Min: {current_weights.min():.6f}, Max: {current_weights.max():.6f}")
     print(f"Number of assets: {len(current_weights)}")
-    for i, date in enumerate(log_returns.index[ESTIMATION_WINDOW:], start=ESTIMATION_WINDOW):
+    # Forward fill weights to ensure continuous series
+    results['weights'].ffill(inplace=True)
+    
+    # Process each trading day
+    for i, date in enumerate(date_range[ESTIMATION_WINDOW:], start=ESTIMATION_WINDOW):
+        # Always print rebalance date if it exists
         if date in rebalance_dates:
             print(f"\nRebalancing on {date.date()}")
-        if i % 30 == 0 or date in rebalance_dates:
+        elif i % 30 == 0:
+            print(f"Processing {date.date()} (day {i+1}/{len(date_range)}")
+        # Always process every 30 days for monitoring
             print(f"Processing {date.date()} (day {i+1}/{len(log_returns)})", end='\r')
         train_data = log_returns.iloc[:i]
         if date in rebalance_dates:
@@ -339,26 +348,39 @@ def run_backtest(log_returns: pd.DataFrame, rebalance_dates: pd.DatetimeIndex,
             print(f"Number of assets with weight > 0: {(new_weights > 1e-6).sum()}")
             results['weights'].loc[date, :] = new_weights
             current_weights = new_weights.copy()
-        results['weights'].loc[date, :] = current_weights
-        simple_returns = np.exp(log_returns.loc[date]) - 1
+        # Update weights only if we have new values
+        if date in log_returns.index:
+            results['weights'].loc[date, :] = current_weights
+        # Only calculate returns if we have data for this date
+        if date in log_returns.index:
+            simple_returns = np.exp(log_returns.loc[date]) - 1
+            daily_return = (current_weights * simple_returns).sum()
+            results['daily_returns'].loc[date] = daily_return
+            
+            if i > ESTIMATION_WINDOW:
+                results['portfolio_value'].loc[date] = results['portfolio_value'].iloc[i-1] * (1 + daily_return)
+            else:
+                results['portfolio_value'].loc[date] = 1.0 * (1 + daily_return)
         daily_return = (current_weights * simple_returns).sum()
         results['daily_returns'].loc[date] = daily_return
         if i > ESTIMATION_WINDOW:
             results['portfolio_value'].loc[date] = results['portfolio_value'].iloc[i-1] * (1 + daily_return)
-            for tc in TRANSACTION_COSTS:
-                tc_key = f'portfolio_value_after_tc_{int(tc*10000)}bps'
-                results[tc_key] = apply_transaction_costs(
-                    portfolio_values=results['portfolio_value'],
-                    turnover_series=results['turnover'],
-                    rebalance_dates=rebalance_dates,
-                    tc_rate=tc
-                )
-                print(f"✓ Applied {tc*100:.2f}% transaction cost adjustment: saved as {tc_key}")
+            # Commenting out transaction cost calculations for now
+            # for tc in TRANSACTION_COSTS:
+            #     tc_key = f'portfolio_value_after_tc_{int(tc*10000)}bps'
+            #     results[tc_key] = apply_transaction_costs(
+            #         portfolio_values=results['portfolio_value'],
+            #         turnover_series=results['turnover'],
+            #         rebalance_dates=rebalance_dates,
+            #         tc_rate=tc
+            #     )
+            #     print(f"✓ Applied {tc*100:.2f}% transaction cost adjustment: saved as {tc_key}")
         else:
             results['portfolio_value'].loc[date] = 1.0 * (1 + daily_return)
         if i < ESTIMATION_WINDOW + 5 or date in rebalance_dates:
-            print(f"Day {i}: Portfolio Value = {results['portfolio_value'].iloc[i]:.6f}, "
-                  f"Daily Return = {daily_return:.6f}")
+            if i < ESTIMATION_WINDOW + 5 or date in rebalance_dates:
+                print(f"Day {i}: Portfolio Value = {results['portfolio_value'].loc[date]:.6f}, "
+                      f"Daily Return = {daily_return:.6f}")
     return results
 
 def calculate_performance_metrics(portfolio_values: pd.Series, 
@@ -479,15 +501,19 @@ def plot_backtest_results(results: Dict[str, pd.Series], title: str = 'Portfolio
 
 def apply_transaction_costs(portfolio_values: pd.Series, turnover_series: pd.Series, 
                           rebalance_dates: pd.DatetimeIndex, tc_rate: float) -> pd.Series:
-    adjusted_values = portfolio_values.copy()
+    # Ensure we have continuous data series
+    date_range = pd.date_range(start=portfolio_values.index[0], end=portfolio_values.index[-1], freq='B')
+    adjusted_values = portfolio_values.reindex(date_range).ffill()
+    turnover_series = turnover_series.reindex(date_range).ffill()
+    
     for date in rebalance_dates:
-        if date in adjusted_values.index and date in turnover_series.index:
+        # Only apply transaction costs if we have both portfolio value and turnover data
+        if date in adjusted_values.index and date in turnover_series.index and not pd.isna(turnover_series[date]):
             adjusted_values.loc[date:] *= (1 - tc_rate * turnover_series[date])
-        else:
-            print(f"Warning: Missing data for {date} in turnover or portfolio values")
     return adjusted_values
 
-def calculate_tc_metrics(results, benchmark_returns, weights_history, strategy_name, first_rebalance_date):
+# Commenting out transaction cost metrics calculation
+# def calculate_tc_metrics(results, benchmark_returns, weights_history, strategy_name, first_rebalance_date):
     metrics_list = []
     freq = 252
     safe_name = strategy_name.lower().replace('-', '_').replace(' ', '_')
